@@ -1,7 +1,4 @@
-function [mem, centers] = dipm(X, pval, splitRat, shift, clustering_func, ident)
-%% This is a modified version of the dip-means algorithm
-% introduced by Argyris Kalogeratos. Please find the original source code at;
-% http://kalogeratos.com/psite/material/dip-means/
+function [mem, centers] = dipm(X, pval, splitRat, shift, clustering_func)
 
 if isequal(clustering_func,@multidim_KSC)
     distFunc = @dhat_shift_dep_multi;
@@ -23,17 +20,19 @@ else
                 averagingFunc = @kmeans_centroid;
                 ident = 'kmeans';
             else
-                display('this should not happen');
+                display('please enter a valid clustering function: [multidim_KSC,multidim_kShape,multidim_kDBA,multidim_kMeans]');
+                return
             end
         end
     end
 end
 
-addpath('../hartigan_dip/.')
-smallest_cluster        = 10;  % number of object that a cluster may have so that it doesnt split further
 
-if ( nargin < 3 )
-    error('Syntax : [groups, centers] = dipmeans(data, pval, splitRat, shift, @clustering func, distFunc, identityString])');
+addpath('hartigan_dip/.')
+smallest_cluster        = 2;  % number of object that a cluster may have so that it doesn't split further
+
+if ( nargin < 5 )
+    error('Syntax : [groups, centers] = dipm(data, pval, splitRat, shift, @clustering func])');
     return;
 end
 
@@ -46,7 +45,7 @@ tClus  = {};
 clus   = {1:n};
 centers  = [];
 
-distFile = strcat('distances/',ident,'_',num2str(n),'_',num2str(m),'_',num2str(d),'_shift_',num2str(shift),'.mat');
+distFile = strcat('distances/',ident,'/pairwise_n_',num2str(n),'_m_',num2str(m),'_d_',num2str(d),'_shift_',num2str(shift),'.mat');
 
 if exist(distFile, 'file') == 2
     projected = load(distFile);
@@ -64,8 +63,7 @@ else
     save(distFile,'projected');
 end
 
-
-hartigFile = strcat('distances/',ident,'initial_hartigan_',num2str(n),'_',num2str(m),'_',num2str(d),'_shift_',num2str(shift),'.mat');
+hartigFile = strcat('distances/',ident,'/hartigan_n_',num2str(n),'_m_',num2str(m),'_d_',num2str(d),'_shift_',num2str(shift),'.mat');
 if exist(hartigFile, 'file') == 2
     dat = load(hartigFile);
     dips = dat.dips;
@@ -84,9 +82,31 @@ end
 
 score = length(find(ps<=pval))/length(ps);
 display('Initial Checks Done...');
+%if ( score < splitRat )
+%    cent_init = averagingFunc(ones(size(X,1),1),X,1,(sum(X,1)/n),shift);
+%    centers(1,:,:)  = cent_init;
+%    mem             = ones(n,1);
+%    return;
+%end
+
+%% initialize two centers based on best splitter (people's front of judea)
+[~,splitViewer] = max(dips);
+
+err = intmax;
+for kmi = 1:10
+    [ncm_, ~, err_] = kmeans(projected(splitViewer,:)',2,'Start',[min(projected(splitViewer,projected(splitViewer,:)~=0));max(projected(splitViewer,projected(splitViewer,:)~=0))]);
+    err_ = sum(err_);
+    if err_ < err
+        ncm = ncm_;
+        err = err_;
+    end
+end
+
+%ncm = kmeans(projected(splitViewer,:)',2,'Start',[min(projected(splitViewer,:));max(projected(splitViewer,:))]);
+rcenters(1,:,:) = averagingFunc(ones(nnz(ncm==1),1), X(ncm == 1,:,:),1,sum(X(ncm==1,:,:),1)/n,shift);
+rcenters(2,:,:) = averagingFunc(ones(nnz(ncm==2),1), X(ncm == 2,:,:),1,sum(X(ncm==2,:,:),1)/n,shift);
 
 
-start = true;
 while (ready == 0)
     ready    = 1;
     
@@ -100,17 +120,12 @@ while (ready == 0)
 
     
     % perform clustering
-    if start
-        [mem, tcenters] = clustering_func( X(tX_ids,:,:), k, shift);
-        start = false;
-    else
-        [mem, tcenters] = clustering_func( X(tX_ids,:,:), k, shift, rcenters);
-    end
+    [mem, tcenters] = clustering_func( X(tX_ids,:,:), k, shift, rcenters);
     rcenters = [];
     rdip = {};
     rprojected = {};
     rX_ids   = [];  % running ids
-    tClus = {};
+    
     % store the clusters separately
     
     for ki=1:k
@@ -123,7 +138,7 @@ while (ready == 0)
             projected_ = projected(tClus{ki},tClus{ki});
             ps = zeros(length(tClus{ki}),1);
             dips = zeros(length(tClus{ki}),1);
-            for ii = 1:length(tClus{ki})
+            parfor ii = 1:length(tClus{ki})
                 [dip,p] = HartigansDipSignifTest(projected_(ii,:),1000);
                 ps(ii) = p;
                 dips(ii) = dip;
@@ -131,12 +146,19 @@ while (ready == 0)
             scores(ki) = length(find(ps<=pval))/length(ps);
         end
 
-        % check if this cluster is accepted or infinite loop and do some accounting
-        if ( scores(ki) <= splitRat || aC > 19)
+        % check if this cluster is accepted and do some accounting
+        if ( scores(ki) <= splitRat)
             taC = taC + 1;
             aC  = aC  + 1;
             clus{aC}         = tClus{ki};
-            centers(aC,:,:)  = tcenters(ki,:,:);
+            if length(size(X)) == 3
+                centers(aC,:,:)  = tcenters(ki,:,:);
+            else
+                if length(size(X)) == 2
+                    centers(aC,:)  = tcenters(ki,:);
+                end
+            end
+            
         else
             ready              = 0;
             tnaC               = tnaC + 1;
@@ -153,10 +175,10 @@ while (ready == 0)
     end
     display(strcat('# of accepted clus this turn: ',num2str(taC),', # of non-accepted clus this turn: ',num2str(tnaC),...
                         ', # of accepted clus overall: ',num2str(aC)));
-    
     if ( ready == 0 )
         k  = k + 1 - taC; % increase the k, take out the accepted clusters from the data
         tX_ids = rX_ids;
+
         % split up the highest multimodal cluster with its best splitter
         [~,splitViewer] = max(rdip{maxscore_rindex});
         view = reshape(rprojected{maxscore_rindex}(splitViewer,:),1,size(rprojected{maxscore_rindex},2));
@@ -171,9 +193,8 @@ while (ready == 0)
         end
         
         sClus = tClus{maxscore_gindex};
-        rcenters(k,:,:) = ksc_centroid(ones(nnz(ncm==2),1), X(sClus(ncm == 2),:,:),1,rcenters(maxscore_rindex,:,:),shift);
-        rcenters(maxscore_rindex,:,:) = ksc_centroid(ones(nnz(ncm==1),1), X(sClus(ncm == 1),:,:),1,rcenters(maxscore_rindex,:,:),shift);
-        
+        rcenters(k,:,:) = averagingFunc(ones(nnz(ncm==2),1), X(sClus(ncm == 2),:,:),1,rcenters(maxscore_rindex,:,:),shift);
+        rcenters(maxscore_rindex,:,:) = averagingFunc(ones(nnz(ncm==1),1), X(sClus(ncm == 1),:,:),1,rcenters(maxscore_rindex,:,:),shift);
     end
 end
 
